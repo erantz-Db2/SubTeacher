@@ -1,361 +1,262 @@
-import streamlit as st
-import pandas as pd
-import io
-import re
 import os
-from typing import List, Dict, Set, Any, Tuple
+import re
+import io
+import pandas as pd
+import streamlit as st
+from typing import List, Dict, Set, Any, Tuple, Optional
+from pathlib import Path
+from dataclasses import dataclass
 
 # ==========================================
-# 1. Configuration & Setup
+# 1. Configuration & Constants
 # ==========================================
 st.set_page_config(page_title="מערכת שיבוץ מילוי מקום", layout="wide", page_icon="📅")
 
-SAVE_DIR = "saved_files"
-os.makedirs(SAVE_DIR, exist_ok=True)
+SAVE_DIR = Path("saved_files")
+SAVE_DIR.mkdir(exist_ok=True)
+
+DAYS_ALIASES = {
+    "ראשון": ["ראשון", "א'", "יום א"],
+    "שני": ["שני", "ב'", "יום ב"],
+    "שלישי": ["שלישי", "ג'", "יום ג"],
+    "רביעי": ["רביעי", "ד'", "יום ד"],
+    "חמישי": ["חמישי", "ה'", "יום ה"],
+    "שישי": ["שישי", "ו'", "יום ו"]
+}
+
+@dataclass
+class CoverRecord:
+    hour: int
+    room: str
+    missing_teacher: str
+    substitute: Optional[str] = None
+    notes: str = ""
 
 # ==========================================
-# 2. File Management Functions
+# 2. Data Access Layer (File IO)
 # ==========================================
-def save_uploaded_file(uploaded_file, prefix: str) -> str:
-    # מחיקת קבצים ישנים מאותו סוג (כיתות או מורים)
-    for f in os.listdir(SAVE_DIR):
-        if f.startswith(prefix):
-            os.remove(os.path.join(SAVE_DIR, f))
-            
-    # שמירת הקובץ החדש
-    file_path = os.path.join(SAVE_DIR, f"{prefix}_{uploaded_file.name}")
-    with open(file_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-    return file_path
+class DataAccess:
+    @staticmethod
+    def save_file(uploaded_file, prefix: str) -> Path:
+        for f in SAVE_DIR.glob(f"{prefix}_*"):
+            f.unlink()
+        file_path = SAVE_DIR / f"{prefix}_{uploaded_file.name}"
+        file_path.write_bytes(uploaded_file.getbuffer())
+        return file_path
 
-def get_saved_file(prefix: str) -> str:
-    if not os.path.exists(SAVE_DIR): return None
-    for f in os.listdir(SAVE_DIR):
-        if f.startswith(prefix):
-            return os.path.join(SAVE_DIR, f)
-    return None
+    @staticmethod
+    def get_file(prefix: str) -> Optional[Path]:
+        files = list(SAVE_DIR.glob(f"{prefix}_*"))
+        return files[0] if files else None
 
-# ==========================================
-# 3. Utility Functions
-# ==========================================
-def parse_comma_separated(text: str) -> List[str]:
-    if not text: return []
-    result = []
-    for x in text.split(","):
-        if x.strip(): result.append(x.strip())
-    return result
-
-def parse_time_constraints(text: str) -> Dict[str, List[int]]:
-    constraints = {}
-    if not text: return constraints
-    for line in text.split("\n"):
-        if ":" not in line: continue
-        name, hours_str = line.split(":", 1)
-        hours = []
-        for h in hours_str.split(","):
-            if h.strip().isdigit(): hours.append(int(h.strip()))
-        constraints[name.strip()] = hours
-    return constraints
-
-def is_empty_cell(val: Any) -> bool:
-    if pd.isna(val): return True
-    if str(val).strip().lower() in ["nan", "", "none"]: return True
-    return False
-
-def load_file(file_path: str, file_name: str) -> pd.DataFrame:
-    # טיפול בקובץ CSV
-    if file_path.lower().endswith('.csv'):
-        df = pd.read_csv(file_path)
-        if len(df.columns) <= 1:
-            df = pd.read_csv(file_path, sep=';')
-            if len(df.columns) <= 1:
-                df = pd.read_csv(file_path, sep='\t')
-        return df
-    
-    # טיפול בקובץ אקסל רגיל
-    else:
+    @staticmethod
+    def read_spreadsheet(file_path: Path) -> pd.DataFrame:
+        if file_path.suffix.lower() == '.csv':
+            df = pd.read_csv(file_path)
+            if len(df.columns) <= 1: df = pd.read_csv(file_path, sep=';')
+            if len(df.columns) <= 1: df = pd.read_csv(file_path, sep='\t')
+            return df
+        
         sheets = pd.read_excel(file_path, sheet_name=None)
-        best_df = pd.DataFrame()
-        max_cols = 0
-        for name, df in sheets.items():
-            if len(df.columns) >= max_cols:
-                max_cols = len(df.columns)
-                best_df = df
-        return best_df
+        return max(sheets.values(), key=lambda d: len(d.columns))
 
 # ==========================================
-# 4. Data Processing Functions
+# 3. Core Engine (Business Logic)
 # ==========================================
-def load_and_clean_data(classes_path: str, teachers_path: str, day_of_week: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, str], pd.DataFrame]:
-    df_classes = load_file(classes_path, "כיתות")
-    df_teachers = load_file(teachers_path, "מורים")
+class ScheduleEngine:
+    @staticmethod
+    def parse_csv_string(text: str) -> List[str]:
+        return [x.strip() for x in text.split(",") if x.strip()] if text else []
 
-    if len(df_classes.columns) < 2:
-        raise ValueError("קובץ הכיתות לא זוהה נכון. אנא וודא שהקובץ תקין והעלה אותו מחדש.")
-    if len(df_teachers.columns) < 2:
-        raise ValueError("קובץ המורים לא זוהה נכון.")
-    if len(df_teachers) == 0:
-        raise ValueError("קובץ המורים ריק משורות נתונים.")
+    @staticmethod
+    def parse_time_rules(text: str) -> Dict[str, List[int]]:
+        rules = {}
+        if not text: return rules
+        for line in text.splitlines():
+            if ":" not in line: continue
+            name, hours_str = line.split(":", 1)
+            hours = [int(h.strip()) for h in hours_str.split(",") if h.strip().isdigit()]
+            if hours: rules[name.strip()] = hours
+        return rules
 
-    df_classes.columns = [str(c).strip() for c in df_classes.columns]
-    df_teachers.columns = [str(c).strip() for c in df_teachers.columns]
+    @staticmethod
+    def is_empty(val: Any) -> bool:
+        return pd.isna(val) or str(val).strip().lower() in ["nan", "", "none"]
 
-    df_classes.iloc[:, 0] = df_classes.iloc[:, 0].ffill()
-    df_teachers.iloc[:, 0] = df_teachers.iloc[:, 0].ffill()
+    @staticmethod
+    def is_teacher_absent(name: str, hour: int, full_absent: List[str], partial_absent: Dict[str, List[int]]) -> bool:
+        if any(m in name for m in full_absent): return True
+        if any(m in name and hour in hours for m, hours in partial_absent.items()): return True
+        return False
 
-    df_classes = df_classes.replace(r'\n', ' ', regex=True)
-    df_teachers = df_teachers.replace(r'\n', ' ', regex=True)
+    @staticmethod
+    def prepare_daily_data(classes_path: Path, teachers_path: Path, day: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, str], pd.DataFrame]:
+        df_c = DataAccess.read_spreadsheet(classes_path)
+        df_t = DataAccess.read_spreadsheet(teachers_path)
 
-    day_aliases = {
-        "ראשון": ["ראשון", "א'", "יום א"],
-        "שני": ["שני", "ב'", "יום ב"],
-        "שלישי": ["שלישי", "ג'", "יום ג"],
-        "רביעי": ["רביעי", "ד'", "יום ד"],
-        "חמישי": ["חמישי", "ה'", "יום ה"],
-        "שישי": ["שישי", "ו'", "יום ו"]
-    }
-    
-    aliases = day_aliases.get(day_of_week, [day_of_week])
-    pattern = "|".join(aliases)
-    
-    today_c = df_classes[df_classes.iloc[:, 0].astype(str).str.contains(pattern, na=False, regex=True)].copy()
-    today_t = df_teachers[df_teachers.iloc[:, 0].astype(str).str.contains(pattern, na=False, regex=True)].copy()
+        if len(df_c.columns) < 2 or len(df_t.columns) < 2 or df_t.empty:
+            raise ValueError("Data Integrity Error: One or both Excel files are empty or malformed.")
 
-    valid_t = {}
-    for col in df_teachers.columns:
-        t_name = str(df_teachers.iloc[0][col]).strip()
-        if not is_empty_cell(t_name) and "Unnamed" not in t_name and t_name != "חווה חקלאית":
-            valid_t[col] = t_name
+        df_c.columns = [str(c).strip() for c in df_c.columns]
+        df_t.columns = [str(c).strip() for c in df_t.columns]
+        df_c.iloc[:, 0] = df_c.iloc[:, 0].ffill()
+        df_t.iloc[:, 0] = df_t.iloc[:, 0].ffill()
+        df_c.replace(r'\n', ' ', regex=True, inplace=True)
+        df_t.replace(r'\n', ' ', regex=True, inplace=True)
 
-    return today_c, today_t, valid_t, df_classes
+        pattern = "|".join(DAYS_ALIASES.get(day, [day]))
+        daily_c = df_c[df_c.iloc[:, 0].astype(str).str.contains(pattern, na=False, regex=True)].copy()
+        daily_t = df_t[df_t.iloc[:, 0].astype(str).str.contains(pattern, na=False, regex=True)].copy()
 
-def get_day_off_teachers(today_t: pd.DataFrame, valid_t: Dict[str, str]) -> Set[str]:
-    day_off = set()
-    for col, t_name in valid_t.items():
-        if today_t[col].apply(is_empty_cell).all(): day_off.add(t_name)
-    return day_off
+        valid_teachers = {}
+        for col in df_t.columns:
+            t_name = str(df_t.iloc[0][col]).strip()
+            if not ScheduleEngine.is_empty(t_name) and "Unnamed" not in t_name and t_name != "חווה חקלאית":
+                valid_teachers[col] = t_name
 
-def is_teacher_missing(teacher_name: str, hour: int, full_absent: List[str], partial_absent: Dict[str, List[int]]) -> bool:
-    for m in full_absent:
-        if m in teacher_name: return True
-    for m, hours in partial_absent.items():
-        if m in teacher_name and hour in hours: return True
-    return False
+        return daily_c, daily_t, valid_teachers, df_c
 
-# ==========================================
-# 5. Core Engine
-# ==========================================
-def generate_schedule(today_c: pd.DataFrame, today_t: pd.DataFrame, valid_t: Dict[str, str], day_off_teachers: Set[str], full_absent: List[str], partial_absent: Dict[str, List[int]], external_subs: Dict[str, List[int]], no_sub_list: List[str]) -> pd.DataFrame:
-    covers = []
-    teaching_schedule = {}
-    for h in range(1, 10): teaching_schedule[h] = []
-
-    for _, row in today_c.iterrows():
-        hour_str = str(row.iloc[1]).strip().replace(".0", "")
-        hour_match = re.search(r'\b([1-9])\b', hour_str)
-        if not hour_match: continue
-        hour = int(hour_match.group(1))
+    @classmethod
+    def generate_schedule(cls, daily_c: pd.DataFrame, daily_t: pd.DataFrame, valid_t: Dict[str, str], 
+                          f_abs: List[str], p_abs: Dict[str, List[int]], 
+                          ext_subs: Dict[str, List[int]], no_sub: List[str]) -> pd.DataFrame:
         
-        if hour > 7: continue
+        day_off_teachers = {tn for col, tn in valid_t.items() if daily_t[col].apply(cls.is_empty).all()}
+        covers: List[CoverRecord] = []
+        teaching_map = {h: [] for h in range(1, 10)}
 
-        for col in today_c.columns[2:]:
-            cell_val = str(row[col]).strip()
-            if is_empty_cell(cell_val): continue
-            
-            teaching_schedule[hour].append(cell_val)
+        # 1. Identify needs
+        for _, row in daily_c.iterrows():
+            hour_match = re.search(r'\b([1-9])\b', str(row.iloc[1]).strip().replace(".0", ""))
+            if not hour_match: continue
+            hr = int(hour_match.group(1))
+            if hr > 7: continue
 
-            if hour > 6: continue 
-            if not is_teacher_missing(cell_val, hour, full_absent, partial_absent): continue
+            for col in daily_c.columns[2:]:
+                cell_val = str(row[col]).strip()
+                if cls.is_empty(cell_val): continue
                 
-            parts = []
-            for p in cell_val.replace("+", "/").split("/"):
-                if p.strip(): parts.append(p.strip())
-                        
-            present_teacher = False
-            if len(parts) > 1:
-                for p in parts:
-                    if not is_teacher_missing(p, hour, full_absent, partial_absent):
-                        present_teacher = True
-                        break
-            
-            assigned = "(אין צורך במחליף)" if present_teacher else None
-            
-            cover_item = {}
-            cover_item["שעה"] = hour
-            cover_item["כיתה"] = col
-            cover_item["מורה חסרה"] = cell_val
-            cover_item["מחליף ששובץ"] = assigned
-            cover_item["הערות"] = ""
-            covers.append(cover_item)
-
-    internal_availability = {}
-    for h in range(1, 7): internal_availability[h] = []
-        
-    for _, row in today_t.iterrows():
-        hour_str = str(row.iloc[1]).strip().replace(".0", "")
-        hour_match = re.search(r'\b([1-9])\b', hour_str)
-        if not hour_match: continue
-        hour = int(hour_match.group(1))
-        
-        if hour > 6: continue
-
-        for col, t_name in valid_t.items():
-            if t_name in day_off_teachers: continue
+                teaching_map[hr].append(cell_val)
+                if hr > 6: continue 
+                if not cls.is_teacher_absent(cell_val, hr, f_abs, p_abs): continue
+                    
+                parts = [p.strip() for p in cell_val.replace("+", "/").split("/") if p.strip()]
+                present = any(not cls.is_teacher_absent(p, hr, f_abs, p_abs) for p in parts) if len(parts) > 1 else False
                 
-            skip_teacher = False
-            for m in full_absent + no_sub_list:
-                if m in t_name: skip_teacher = True
-            if skip_teacher: continue
+                record = CoverRecord(hour=hr, room=col, missing_teacher=cell_val)
+                if present: record.substitute = "(אין צורך במחליף)"
+                covers.append(record)
+
+        # 2. Map availability
+        avail_map = {h: [] for h in range(1, 7)}
+        for _, row in daily_t.iterrows():
+            hour_match = re.search(r'\b([1-9])\b', str(row.iloc[1]).strip().replace(".0", ""))
+            if not hour_match: continue
+            hr = int(hour_match.group(1))
+            if hr > 6: continue
+
+            for col, t_name in valid_t.items():
+                if t_name in day_off_teachers or any(m in t_name for m in f_abs + no_sub) or cls.is_teacher_absent(t_name, hr, [], p_abs): continue
+                if any(t_name in c_t for c_t in teaching_map.get(hr, [])): continue
                 
-            if is_teacher_missing(t_name, hour, [], partial_absent): continue
-            
-            is_busy = False
-            for c_t in teaching_schedule.get(hour, []):
-                if t_name in c_t: is_busy = True
-            if is_busy: continue
-            
-            val = str(row[col]).strip()
-            if is_empty_cell(val):
-                av_item = {}
-                av_item["name"] = t_name
-                av_item["type"] = "חלון"
-                internal_availability[hour].append(av_item)
-            elif "פרטני" in val.lower():
-                av_item = {}
-                av_item["name"] = t_name
-                av_item["type"] = "פרטני"
-                internal_availability[hour].append(av_item)
+                val = str(row[col]).strip()
+                if cls.is_empty(val): avail_map[hr].append({"name": t_name, "type": "חלון"})
+                elif "פרטני" in val.lower(): avail_map[hr].append({"name": t_name, "type": "פרטני"})
 
-    assigned_externals = {}
-    for s in external_subs: assigned_externals[s] = []
-        
-    assigned_internals = {}
-    for t in valid_t.values(): assigned_internals[t] = 0
+        # 3. Assign substitutes
+        assigned_ext = {s: [] for s in ext_subs}
+        assigned_int = {t: 0 for t in valid_t.values()}
 
-    for cover in covers:
-        if cover["מחליף ששובץ"]: continue
-        
-        hr = cover["שעה"]
-        found_sub = False
+        for c in covers:
+            if c.substitute: continue
+            hr = c.hour
+            found = False
 
-        for sub, h_list in external_subs.items():
-            if hr in h_list and hr not in assigned_externals[sub]:
-                cover["מחליף ששובץ"] = sub
-                cover["הערות"] = "מחליף חיצוני"
-                assigned_externals[sub].append(hr)
-                found_sub = True
-                break
-        
-        if found_sub: continue
-
-        avails = sorted(internal_availability.get(hr, []), key=lambda x: 0 if x["type"] == "חלון" else 1)
-        for av in avails:
-            t_name = av["name"]
-            t_type = av["type"]
-            
-            if assigned_internals.get(t_name, 0) < 1:
-                already_assigned_here = False
-                for c in covers:
-                    if c["שעה"] == hr and c.get("מחליף ששובץ") == t_name:
-                        already_assigned_here = True
-                
-                if not already_assigned_here:
-                    cover["מחליף ששובץ"] = t_name
-                    cover["הערות"] = f"מתוך הצוות ({t_type})"
-                    assigned_internals[t_name] += 1
-                    found_sub = True
+            # Try externals
+            for s, hs in ext_subs.items():
+                if hr in hs and hr not in assigned_ext[s]:
+                    c.substitute, c.notes, found = s, "מחליף חיצוני", True
+                    assigned_ext[s].append(hr)
                     break
-        
-        if not found_sub: cover["מחליף ששובץ"] = "⚠️ חסר מורה!"
+            if found: continue
 
-    return pd.DataFrame(covers)
+            # Try internals
+            avails = sorted(avail_map.get(hr, []), key=lambda x: 0 if x["type"] == "חלון" else 1)
+            for av in avails:
+                tn, tp = av["name"], av["type"]
+                if assigned_int.get(tn, 0) < 1 and not any(cv.substitute == tn for cv in covers if cv.hour == hr):
+                    c.substitute, c.notes, found = tn, f"מתוך הצוות ({tp})", True
+                    assigned_int[tn] += 1
+                    break
+            
+            if not found: c.substitute = "⚠️ חסר מורה!"
+
+        # Convert dataclasses to DataFrame
+        return pd.DataFrame([{"שעה": c.hour, "כיתה": c.room, "מורה חסרה": c.missing_teacher, "מחליף ששובץ": c.substitute, "הערות": c.notes} for c in covers])
 
 # ==========================================
-# 6. UI Layer
+# 4. Presentation Layer (UI)
 # ==========================================
-def main():
-    st.title("🎯 מערכת שיבוץ אוטומטית - מילוי מקום (גרסה 1.1)")
+def render_ui():
+    st.title("🎯 מערכת שיבוץ אוטומטית - מילוי מקום (גרסת Pro)")
 
     st.sidebar.header("1. קובצי מערכת השעות")
+    c_path = DataAccess.get_file("classes")
+    t_path = DataAccess.get_file("teachers")
     
-    # בדיקת קובץ כיתות שמור
-    saved_classes = get_saved_file("classes")
-    if saved_classes:
-        filename = os.path.basename(saved_classes).replace("classes_", "")
-        st.sidebar.success(f"✅ קובץ כיתות שמור: {filename}")
-    
-    classes_file = st.sidebar.file_uploader("העלה קובץ כיתות חדש (כדי להחליף את הקיים)", type=["csv", "xlsx"])
-    if classes_file:
-        saved_classes = save_uploaded_file(classes_file, "classes")
-        # מרפרש את הממשק כדי להראות את ההצלחה מיד
+    if c_path: st.sidebar.success(f"✅ כיתות: {c_path.name.replace('classes_', '')}")
+    cf = st.sidebar.file_uploader("העלה קובץ כיתות חדש", type=["csv", "xlsx"])
+    if cf: 
+        DataAccess.save_file(cf, "classes")
         st.rerun()
 
-    # בדיקת קובץ מורים שמור
-    saved_teachers = get_saved_file("teachers")
-    if saved_teachers:
-        filename = os.path.basename(saved_teachers).replace("teachers_", "")
-        st.sidebar.success(f"✅ קובץ מורים שמור: {filename}")
-        
-    teachers_file = st.sidebar.file_uploader("העלה קובץ מורים חדש (כדי להחליף את הקיים)", type=["csv", "xlsx"])
-    if teachers_file:
-        saved_teachers = save_uploaded_file(teachers_file, "teachers")
+    if t_path: st.sidebar.success(f"✅ מורים: {t_path.name.replace('teachers_', '')}")
+    tf = st.sidebar.file_uploader("העלה קובץ מורים חדש", type=["csv", "xlsx"])
+    if tf: 
+        DataAccess.save_file(tf, "teachers")
         st.rerun()
 
-    day_of_week = st.sidebar.selectbox("בחר יום לשיבוץ", ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי"])
+    day_of_week = st.sidebar.selectbox("בחר יום לשיבוץ", list(DAYS_ALIASES.keys()))
 
     st.sidebar.header("2. אילוצים יומיים")
-    full_absent_input = st.sidebar.text_input("מורים חסרים (יום שלם) - מופרדים בפסיק", "דליה, נועה, רותם, דקלה")
-    partial_absent_input = st.sidebar.text_area("היעדרויות חלקיות (פורמט: שם:שעות)", "נדין:3,4,5\nסתיו:3,4,5,6\nלירון צדוביץ:5,6\nרחל נוב:5,6\nאביטל:2,3,4,5,6")
-    external_subs_input = st.sidebar.text_area("מחליפים חיצוניים (פורמט: שם:שעות)", "יואב:1,2,3,4,5,6\nגלית:1,2,3,4,5\nאירית:3,4,5,6")
-    no_sub_input = st.sidebar.text_input("מורים שלא משבצים כמחליפים בכלל", "ספיר, לילך")
+    f_abs_in = st.sidebar.text_input("חסרים יום שלם (מופרדים בפסיק)", "דליה, נועה, רותם, דקלה")
+    p_abs_in = st.sidebar.text_area("היעדרויות חלקיות (שם:שעות)", "נדין:3,4,5\nסתיו:3,4,5,6\nלירון צדוביץ:5,6\nרחל נוב:5,6\nאביטל:2,3,4,5,6")
+    ext_in = st.sidebar.text_area("מחליפים חיצוניים (שם:שעות)", "יואב:1,2,3,4,5,6\nגלית:1,2,3,4,5\nאירית:3,4,5,6")
+    no_sub_in = st.sidebar.text_input("לא משבצים כמחליפים", "ספיר, לילך")
 
-    if st.sidebar.button("⚙️ הפק שיבוץ יומי"):
-        if not saved_classes or not saved_teachers:
-            st.warning("אנא וודא ששני הקבצים (כיתות ומורים) שמורים במערכת לפני הפקת השיבוץ.")
+    if st.sidebar.button("⚙️ הפק שיבוץ יומי", type="primary"):
+        if not c_path or not t_path:
+            st.error("שגיאה: חסרים קובצי נתונים. אנא העלה את קובצי הכיתות והמורים.")
             return
 
-        with st.spinner("מעבד נתונים ומרכיב מערכת..."):
+        with st.spinner("מעבד נתונים ומפיק שיבוצים..."):
             try:
-                full_absent = parse_comma_separated(full_absent_input)
-                no_sub_list = parse_comma_separated(no_sub_input)
-                partial_absent = parse_time_constraints(partial_absent_input)
-                external_subs = parse_time_constraints(external_subs_input)
+                engine = ScheduleEngine()
+                f_abs = engine.parse_csv_string(f_abs_in)
+                no_sub = engine.parse_csv_string(no_sub_in)
+                p_abs = engine.parse_time_rules(p_abs_in)
+                ext_subs = engine.parse_time_rules(ext_in)
 
-                today_c, today_t, valid_t, raw_classes_df = load_and_clean_data(saved_classes, saved_teachers, day_of_week)
-                day_off_teachers = get_day_off_teachers(today_t, valid_t)
-                
-                df_results = generate_schedule(
-                    today_c, today_t, valid_t, day_off_teachers,
-                    full_absent, partial_absent, external_subs, no_sub_list
-                )
+                daily_c, daily_t, valid_t, raw_df = engine.prepare_daily_data(c_path, t_path, day_of_week)
+                df_results = engine.generate_schedule(daily_c, daily_t, valid_t, f_abs, p_abs, ext_subs, no_sub)
 
                 if df_results.empty:
-                    st.warning("לא נמצאו היעדרויות שדורשות מילוי מקום היום!")
-                    with st.expander("🛠️ כלי אבחון"):
-                        st.write(f"**כמה שורות נמצאו ליום {day_of_week}?** {len(today_c)}")
-                        if len(today_c) == 0:
-                            st.error("הבעיה: המערכת לא מצאה את היום באקסל.")
-                        st.write("**מורים בחופש מלא שאנו מחפשים:**", full_absent)
-                        st.write("**הצצה לקובץ הכיתות כפי שהמערכת קוראת אותו:**")
-                        st.dataframe(raw_classes_df.head())
+                    st.warning(f"לא נמצאו היעדרויות שדורשות מילוי מקום ביום {day_of_week}.")
+                    with st.expander("🛠️ מצב אבחון (Diagnostic Mode)"):
+                        st.write(f"רשומות שאותרו ליום זה: {len(daily_c)}")
+                        st.dataframe(raw_df.head(10))
                 else:
-                    for teacher in df_results["מורה חסרה"].unique():
-                        st.subheader(f"מורה חסרה: {teacher}")
-                        display_df = df_results[df_results["מורה חסרה"] == teacher][["שעה", "כיתה", "מחליף ששובץ", "הערות"]]
-                        st.table(display_df)
+                    for t in df_results["מורה חסרה"].unique():
+                        st.subheader(f"מורה חסרה: {t}")
+                        st.table(df_results[df_results["מורה חסרה"] == t][["שעה", "כיתה", "מחליף ששובץ", "הערות"]])
 
-                    output = io.BytesIO()
-                    df_results.to_excel(output, index=False)
-                    st.download_button(
-                        label="📥 הורד דוח שיבוץ ל-Excel", 
-                        data=output.getvalue(), 
-                        file_name=f"Sub_Schedule_{day_of_week}.xlsx",
-                        type="primary"
-                    )
-                    st.success("השיבוץ הושלם בהצלחה!")
-                    
+                    out = io.BytesIO()
+                    df_results.to_excel(out, index=False)
+                    st.download_button("📥 הורד דוח מילוי מקום (Excel)", out.getvalue(), f"Schedule_{day_of_week}.xlsx", "primary")
+                    st.success("תהליך השיבוץ הסתיים בהצלחה!")
+
             except Exception as e:
-                st.error(f"שגיאה מערכתית: {e}")
+                st.error(f"System Exception: {str(e)}")
 
 if __name__ == "__main__":
-    main()
+    render_ui()
