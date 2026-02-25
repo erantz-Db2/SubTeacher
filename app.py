@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import io
+import re
 from typing import List, Dict, Set, Any, Tuple
 
 # ==========================================
@@ -38,7 +39,7 @@ def is_empty_cell(val: Any) -> bool:
 # ==========================================
 # 3. Data Processing Functions
 # ==========================================
-def load_and_clean_data(classes_file, teachers_file, day_of_week: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, str]]:
+def load_and_clean_data(classes_file, teachers_file, day_of_week: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, str], pd.DataFrame]:
     if classes_file.name.endswith('.csv'): df_classes = pd.read_csv(classes_file)
     else: df_classes = pd.read_excel(classes_file)
     
@@ -54,11 +55,21 @@ def load_and_clean_data(classes_file, teachers_file, day_of_week: str) -> Tuple[
     df_classes = df_classes.replace(r'\n', ' ', regex=True)
     df_teachers = df_teachers.replace(r'\n', ' ', regex=True)
 
-    day_map = {"ראשון": "ראשון", "שני": "שני", "שלישי": "שלישי", "רביעי": "רביעי", "חמישי": "חמישי", "שישי": "שישי"}
-    search_day = day_map.get(day_of_week, day_of_week)
+    # מילון חכם לזיהוי ימים בכל פורמט אפשרי
+    day_aliases = {
+        "ראשון": ["ראשון", "א'", "יום א"],
+        "שני": ["שני", "ב'", "יום ב"],
+        "שלישי": ["שלישי", "ג'", "יום ג"],
+        "רביעי": ["רביעי", "ד'", "יום ד"],
+        "חמישי": ["חמישי", "ה'", "יום ה"],
+        "שישי": ["שישי", "ו'", "יום ו"]
+    }
     
-    today_c = df_classes[df_classes.iloc[:, 0].astype(str).str.contains(search_day, na=False, regex=False)].copy()
-    today_t = df_teachers[df_teachers.iloc[:, 0].astype(str).str.contains(search_day, na=False, regex=False)].copy()
+    aliases = day_aliases.get(day_of_week, [day_of_week])
+    pattern = "|".join(aliases)
+    
+    today_c = df_classes[df_classes.iloc[:, 0].astype(str).str.contains(pattern, na=False, regex=True)].copy()
+    today_t = df_teachers[df_teachers.iloc[:, 0].astype(str).str.contains(pattern, na=False, regex=True)].copy()
 
     valid_t = {}
     for col in df_teachers.columns:
@@ -66,7 +77,7 @@ def load_and_clean_data(classes_file, teachers_file, day_of_week: str) -> Tuple[
         if not is_empty_cell(t_name) and "Unnamed" not in t_name and t_name != "חווה חקלאית":
             valid_t[col] = t_name
 
-    return today_c, today_t, valid_t
+    return today_c, today_t, valid_t, df_classes
 
 def get_day_off_teachers(today_t: pd.DataFrame, valid_t: Dict[str, str]) -> Set[str]:
     day_off = set()
@@ -87,11 +98,14 @@ def is_teacher_missing(teacher_name: str, hour: int, full_absent: List[str], par
 def generate_schedule(today_c: pd.DataFrame, today_t: pd.DataFrame, valid_t: Dict[str, str], day_off_teachers: Set[str], full_absent: List[str], partial_absent: Dict[str, List[int]], external_subs: Dict[str, List[int]], no_sub_list: List[str]) -> pd.DataFrame:
     covers = []
     teaching_schedule = {}
-    for h in range(1, 8): teaching_schedule[h] = []
+    for h in range(1, 10): teaching_schedule[h] = []
 
     for _, row in today_c.iterrows():
-        try: hour = int(float(str(row.iloc[1]).strip()))
-        except ValueError: continue
+        # חילוץ חכם של השעה (גם אם כתוב 1.0, 1, או שעה 1)
+        hour_str = str(row.iloc[1]).strip().replace(".0", "")
+        hour_match = re.search(r'\b([1-9])\b', hour_str)
+        if not hour_match: continue
+        hour = int(hour_match.group(1))
         
         if hour > 7: continue
 
@@ -129,8 +143,10 @@ def generate_schedule(today_c: pd.DataFrame, today_t: pd.DataFrame, valid_t: Dic
     for h in range(1, 7): internal_availability[h] = []
         
     for _, row in today_t.iterrows():
-        try: hour = int(float(str(row.iloc[1]).strip()))
-        except ValueError: continue
+        hour_str = str(row.iloc[1]).strip().replace(".0", "")
+        hour_match = re.search(r'\b([1-9])\b', hour_str)
+        if not hour_match: continue
+        hour = int(hour_match.group(1))
         
         if hour > 6: continue
 
@@ -235,7 +251,7 @@ def main():
                 partial_absent = parse_time_constraints(partial_absent_input)
                 external_subs = parse_time_constraints(external_subs_input)
 
-                today_c, today_t, valid_t = load_and_clean_data(classes_file, teachers_file, day_of_week)
+                today_c, today_t, valid_t, raw_classes_df = load_and_clean_data(classes_file, teachers_file, day_of_week)
                 day_off_teachers = get_day_off_teachers(today_t, valid_t)
                 
                 df_results = generate_schedule(
@@ -244,7 +260,18 @@ def main():
                 )
 
                 if df_results.empty:
-                    st.success("לא נמצאו היעדרויות שדורשות מילוי מקום היום!")
+                    st.warning("לא נמצאו היעדרויות שדורשות מילוי מקום היום!")
+                    
+                    # כלי אבחון למקרה שזה עדיין קורה
+                    with st.expander("🛠️ כלי אבחון (לחץ כאן אם התוצאה לא הגיונית)"):
+                        st.write(f"**כמה שורות נמצאו ליום {day_of_week}?** {len(today_c)}")
+                        if len(today_c) == 0:
+                            st.error("הבעיה: המערכת לא מצאה את היום הזה באקסל. אולי העמודה של היום לא מופיעה ראשונה בקובץ?")
+                        st.write("**מורים בחופש מלא שאנו מחפשים:**", full_absent)
+                        st.write("**מורים בחופש חלקי שאנו מחפשים:**", list(partial_absent.keys()))
+                        st.write("**הצצה לקובץ הכיתות כפי שהמערכת קוראת אותו (5 שורות ראשונות):**")
+                        st.dataframe(raw_classes_df.head())
+
                 else:
                     for teacher in df_results["מורה חסרה"].unique():
                         st.subheader(f"מורה חסרה: {teacher}")
