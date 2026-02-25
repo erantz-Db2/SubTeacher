@@ -36,8 +36,10 @@ def is_empty_cell(val: Any) -> bool:
     if str(val).strip().lower() in ["nan", "", "none"]: return True
     return False
 
+# מנוע קריאת קבצים חכם ועמיד בפני גיליונות ריקים ותקלות CSV
 def load_file(file_obj, file_name: str) -> pd.DataFrame:
-    if file_obj.name.endswith('.csv'):
+    # טיפול בקובץ CSV
+    if file_obj.name.lower().endswith('.csv'):
         file_obj.seek(0)
         df = pd.read_csv(file_obj)
         # תיקון לבעיית נקודה-פסיק בישראל
@@ -48,8 +50,19 @@ def load_file(file_obj, file_name: str) -> pd.DataFrame:
                 file_obj.seek(0)
                 df = pd.read_csv(file_obj, sep='\t')
         return df
+    
+    # טיפול בקובץ אקסל רגיל
     else:
-        return pd.read_excel(file_obj)
+        file_obj.seek(0)
+        sheets = pd.read_excel(file_obj, sheet_name=None)
+        # סריקה חכמה: בוחרים את הגיליון עם הכי הרבה עמודות (כדי לדלג על גיליונות ריקים כמו Sheet2)
+        best_df = pd.DataFrame()
+        max_cols = 0
+        for name, df in sheets.items():
+            if len(df.columns) >= max_cols:
+                max_cols = len(df.columns)
+                best_df = df
+        return best_df
 
 # ==========================================
 # 3. Data Processing Functions
@@ -59,9 +72,9 @@ def load_and_clean_data(classes_file, teachers_file, day_of_week: str) -> Tuple[
     df_teachers = load_file(teachers_file, "מורים")
 
     if len(df_classes.columns) < 2:
-        raise ValueError("קובץ הכיתות לא זוהה נכון (נמצאה עמודה אחת בלבד). אנא שמור את הקובץ המקורי כ-Excel (.xlsx) והעלה אותו שוב.")
+        raise ValueError("קובץ הכיתות לא זוהה נכון (נמצאה עמודה אחת בלבד או שגיליון העבודה ריק). אנא וודא שהקובץ תקין.")
     if len(df_teachers.columns) < 2:
-        raise ValueError("קובץ המורים לא זוהה נכון (נמצאה עמודה אחת בלבד).")
+        raise ValueError("קובץ המורים לא זוהה נכון (נמצאה עמודה אחת בלבד או גיליון ריק).")
     if len(df_teachers) == 0:
         raise ValueError("קובץ המורים ריק משורות נתונים.")
 
