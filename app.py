@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import io
 import re
+import os
 from typing import List, Dict, Set, Any, Tuple
 
 # ==========================================
@@ -9,8 +10,33 @@ from typing import List, Dict, Set, Any, Tuple
 # ==========================================
 st.set_page_config(page_title="מערכת שיבוץ מילוי מקום", layout="wide", page_icon="📅")
 
+SAVE_DIR = "saved_files"
+os.makedirs(SAVE_DIR, exist_ok=True)
+
 # ==========================================
-# 2. Utility Functions
+# 2. File Management Functions
+# ==========================================
+def save_uploaded_file(uploaded_file, prefix: str) -> str:
+    # מחיקת קבצים ישנים מאותו סוג (כיתות או מורים)
+    for f in os.listdir(SAVE_DIR):
+        if f.startswith(prefix):
+            os.remove(os.path.join(SAVE_DIR, f))
+            
+    # שמירת הקובץ החדש
+    file_path = os.path.join(SAVE_DIR, f"{prefix}_{uploaded_file.name}")
+    with open(file_path, "wb") as f:
+        f.write(uploaded_file.getbuffer())
+    return file_path
+
+def get_saved_file(prefix: str) -> str:
+    if not os.path.exists(SAVE_DIR): return None
+    for f in os.listdir(SAVE_DIR):
+        if f.startswith(prefix):
+            return os.path.join(SAVE_DIR, f)
+    return None
+
+# ==========================================
+# 3. Utility Functions
 # ==========================================
 def parse_comma_separated(text: str) -> List[str]:
     if not text: return []
@@ -36,26 +62,19 @@ def is_empty_cell(val: Any) -> bool:
     if str(val).strip().lower() in ["nan", "", "none"]: return True
     return False
 
-# מנוע קריאת קבצים חכם ועמיד בפני גיליונות ריקים ותקלות CSV
-def load_file(file_obj, file_name: str) -> pd.DataFrame:
+def load_file(file_path: str, file_name: str) -> pd.DataFrame:
     # טיפול בקובץ CSV
-    if file_obj.name.lower().endswith('.csv'):
-        file_obj.seek(0)
-        df = pd.read_csv(file_obj)
-        # תיקון לבעיית נקודה-פסיק בישראל
+    if file_path.lower().endswith('.csv'):
+        df = pd.read_csv(file_path)
         if len(df.columns) <= 1:
-            file_obj.seek(0)
-            df = pd.read_csv(file_obj, sep=';')
+            df = pd.read_csv(file_path, sep=';')
             if len(df.columns) <= 1:
-                file_obj.seek(0)
-                df = pd.read_csv(file_obj, sep='\t')
+                df = pd.read_csv(file_path, sep='\t')
         return df
     
     # טיפול בקובץ אקסל רגיל
     else:
-        file_obj.seek(0)
-        sheets = pd.read_excel(file_obj, sheet_name=None)
-        # סריקה חכמה: בוחרים את הגיליון עם הכי הרבה עמודות (כדי לדלג על גיליונות ריקים כמו Sheet2)
+        sheets = pd.read_excel(file_path, sheet_name=None)
         best_df = pd.DataFrame()
         max_cols = 0
         for name, df in sheets.items():
@@ -65,16 +84,16 @@ def load_file(file_obj, file_name: str) -> pd.DataFrame:
         return best_df
 
 # ==========================================
-# 3. Data Processing Functions
+# 4. Data Processing Functions
 # ==========================================
-def load_and_clean_data(classes_file, teachers_file, day_of_week: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, str], pd.DataFrame]:
-    df_classes = load_file(classes_file, "כיתות")
-    df_teachers = load_file(teachers_file, "מורים")
+def load_and_clean_data(classes_path: str, teachers_path: str, day_of_week: str) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, str], pd.DataFrame]:
+    df_classes = load_file(classes_path, "כיתות")
+    df_teachers = load_file(teachers_path, "מורים")
 
     if len(df_classes.columns) < 2:
-        raise ValueError("קובץ הכיתות לא זוהה נכון (נמצאה עמודה אחת בלבד או שגיליון העבודה ריק). אנא וודא שהקובץ תקין.")
+        raise ValueError("קובץ הכיתות לא זוהה נכון. אנא וודא שהקובץ תקין והעלה אותו מחדש.")
     if len(df_teachers.columns) < 2:
-        raise ValueError("קובץ המורים לא זוהה נכון (נמצאה עמודה אחת בלבד או גיליון ריק).")
+        raise ValueError("קובץ המורים לא זוהה נכון.")
     if len(df_teachers) == 0:
         raise ValueError("קובץ המורים ריק משורות נתונים.")
 
@@ -124,7 +143,7 @@ def is_teacher_missing(teacher_name: str, hour: int, full_absent: List[str], par
     return False
 
 # ==========================================
-# 4. Core Engine
+# 5. Core Engine
 # ==========================================
 def generate_schedule(today_c: pd.DataFrame, today_t: pd.DataFrame, valid_t: Dict[str, str], day_off_teachers: Set[str], full_absent: List[str], partial_absent: Dict[str, List[int]], external_subs: Dict[str, List[int]], no_sub_list: List[str]) -> pd.DataFrame:
     covers = []
@@ -252,14 +271,35 @@ def generate_schedule(today_c: pd.DataFrame, today_t: pd.DataFrame, valid_t: Dic
     return pd.DataFrame(covers)
 
 # ==========================================
-# 5. UI Layer
+# 6. UI Layer
 # ==========================================
 def main():
-    st.title("🎯 מערכת שיבוץ אוטומטית - מילוי מקום")
+    st.title("🎯 מערכת שיבוץ אוטומטית - מילוי מקום (גרסה 1.1)")
 
-    st.sidebar.header("1. העלאת נתונים")
-    classes_file = st.sidebar.file_uploader("העלה קובץ כיתות (CSV/Excel)", type=["csv", "xlsx"])
-    teachers_file = st.sidebar.file_uploader("העלה קובץ מורים (CSV/Excel)", type=["csv", "xlsx"])
+    st.sidebar.header("1. קובצי מערכת השעות")
+    
+    # בדיקת קובץ כיתות שמור
+    saved_classes = get_saved_file("classes")
+    if saved_classes:
+        filename = os.path.basename(saved_classes).replace("classes_", "")
+        st.sidebar.success(f"✅ קובץ כיתות שמור: {filename}")
+    
+    classes_file = st.sidebar.file_uploader("העלה קובץ כיתות חדש (כדי להחליף את הקיים)", type=["csv", "xlsx"])
+    if classes_file:
+        saved_classes = save_uploaded_file(classes_file, "classes")
+        # מרפרש את הממשק כדי להראות את ההצלחה מיד
+        st.rerun()
+
+    # בדיקת קובץ מורים שמור
+    saved_teachers = get_saved_file("teachers")
+    if saved_teachers:
+        filename = os.path.basename(saved_teachers).replace("teachers_", "")
+        st.sidebar.success(f"✅ קובץ מורים שמור: {filename}")
+        
+    teachers_file = st.sidebar.file_uploader("העלה קובץ מורים חדש (כדי להחליף את הקיים)", type=["csv", "xlsx"])
+    if teachers_file:
+        saved_teachers = save_uploaded_file(teachers_file, "teachers")
+        st.rerun()
 
     day_of_week = st.sidebar.selectbox("בחר יום לשיבוץ", ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי"])
 
@@ -270,8 +310,8 @@ def main():
     no_sub_input = st.sidebar.text_input("מורים שלא משבצים כמחליפים בכלל", "ספיר, לילך")
 
     if st.sidebar.button("⚙️ הפק שיבוץ יומי"):
-        if not classes_file or not teachers_file:
-            st.warning("אנא העלה את שני הקבצים לפני הפקת השיבוץ.")
+        if not saved_classes or not saved_teachers:
+            st.warning("אנא וודא ששני הקבצים (כיתות ומורים) שמורים במערכת לפני הפקת השיבוץ.")
             return
 
         with st.spinner("מעבד נתונים ומרכיב מערכת..."):
@@ -281,7 +321,7 @@ def main():
                 partial_absent = parse_time_constraints(partial_absent_input)
                 external_subs = parse_time_constraints(external_subs_input)
 
-                today_c, today_t, valid_t, raw_classes_df = load_and_clean_data(classes_file, teachers_file, day_of_week)
+                today_c, today_t, valid_t, raw_classes_df = load_and_clean_data(saved_classes, saved_teachers, day_of_week)
                 day_off_teachers = get_day_off_teachers(today_t, valid_t)
                 
                 df_results = generate_schedule(
@@ -291,13 +331,12 @@ def main():
 
                 if df_results.empty:
                     st.warning("לא נמצאו היעדרויות שדורשות מילוי מקום היום!")
-                    with st.expander("🛠️ כלי אבחון (לחץ כאן אם התוצאה לא הגיונית)"):
+                    with st.expander("🛠️ כלי אבחון"):
                         st.write(f"**כמה שורות נמצאו ליום {day_of_week}?** {len(today_c)}")
                         if len(today_c) == 0:
-                            st.error("הבעיה: המערכת לא מצאה את היום הזה באקסל. אולי העמודה של היום לא מופיעה ראשונה בקובץ?")
+                            st.error("הבעיה: המערכת לא מצאה את היום באקסל.")
                         st.write("**מורים בחופש מלא שאנו מחפשים:**", full_absent)
-                        st.write("**מורים בחופש חלקי שאנו מחפשים:**", list(partial_absent.keys()))
-                        st.write("**הצצה לקובץ הכיתות כפי שהמערכת קוראת אותו (5 שורות ראשונות):**")
+                        st.write("**הצצה לקובץ הכיתות כפי שהמערכת קוראת אותו:**")
                         st.dataframe(raw_classes_df.head())
                 else:
                     for teacher in df_results["מורה חסרה"].unique():
