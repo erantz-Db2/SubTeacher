@@ -14,7 +14,12 @@ st.set_page_config(page_title="מערכת שיבוץ מילוי מקום", layou
 def parse_comma_separated(text: str) -> List[str]:
     if not text:
         return []
-    return [x.strip() for x in text.split(",") if x.strip()]
+    result = []
+    for x in text.split(","):
+        clean_x = x.strip()
+        if clean_x:
+            result.append(clean_x)
+    return result
 
 def parse_time_constraints(text: str) -> Dict[str, List[int]]:
     constraints = {}
@@ -22,7 +27,11 @@ def parse_time_constraints(text: str) -> Dict[str, List[int]]:
         for line in text.split("\n"):
             if ":" in line:
                 name, hours_str = line.split(":", 1)
-                hours = [int(h.strip()) for h in hours_str.split(",") if h.strip().isdigit()]
+                hours = []
+                for h in hours_str.split(","):
+                    h_clean = h.strip()
+                    if h_clean.isdigit():
+                        hours.append(int(h_clean))
                 constraints[name.strip()] = hours
     return constraints
 
@@ -74,58 +83,8 @@ def get_day_off_teachers(today_t: pd.DataFrame, valid_t: Dict[str, str]) -> Set[
     return day_off
 
 def is_teacher_missing(teacher_name: str, hour: int, full_absent: List[str], partial_absent: Dict[str, List[int]]) -> bool:
-    if any(m in teacher_name for m in full_absent):
-        return True
+    for m in full_absent:
+        if m in teacher_name:
+            return True
     for m, hours in partial_absent.items():
         if m in teacher_name and hour in hours:
-            return True
-    return False
-
-# ==========================================
-# 4. Core Engine
-# ==========================================
-def generate_schedule(today_c: pd.DataFrame, today_t: pd.DataFrame, valid_t: Dict[str, str], day_off_teachers: Set[str], 
-                      full_absent: List[str], partial_absent: Dict[str, List[int]], 
-                      external_subs: Dict[str, List[int]], no_sub_list: List[str]) -> pd.DataFrame:
-    
-    covers = []
-    teaching_schedule = {h: [] for h in range(1, 8)}
-
-    # שלב א': מיפוי כיתות ומציאת חוסרים
-    for _, row in today_c.iterrows():
-        try:
-            hour = int(float(str(row.iloc[1]).strip()))
-        except ValueError:
-            continue
-        
-        if hour > 7: continue
-
-        for col in today_c.columns[2:]:
-            cell_val = str(row[col]).strip()
-            if is_empty_cell(cell_val): 
-                continue
-            
-            teaching_schedule[hour].append(cell_val)
-
-            if hour > 6: continue 
-
-            if is_teacher_missing(cell_val, hour, full_absent, partial_absent):
-                
-                # פיצול בטוח כדי למנוע שגיאות שבירת שורה
-                raw_parts = cell_val.replace("+", "/").split("/")
-                parts = []
-                for p in raw_parts:
-                    clean_p = p.strip()
-                    if clean_p:
-                        parts.append(clean_p)
-                        
-                present_teacher = False
-                
-                if len(parts) > 1:
-                    for p in parts:
-                        if not is_teacher_missing(p, hour, full_absent, partial_absent):
-                            present_teacher = True
-                            break
-                
-                assigned = "(אין צורך במחליף)" if present_teacher else None
-                covers.append({
