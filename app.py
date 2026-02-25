@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title=מערכת שיבוץ מילוי מקום, layout=wide, page_icon=📅)
+st.set_page_config(page_title="מערכת שיבוץ מילוי מקום", layout="wide", page_icon="📅")
 
 st.title(🎯 מערכת שיבוץ אוטומטית - מילוי מקום)
 
@@ -181,4 +181,5 @@ if st.sidebar.button(⚙️ הפק שיבוץ יומי) and classes_file and tea
     except Exception as e
         st.error(fשגיאה בעיבוד הנתונים {str(e)}nוודא שהקבצים תואמים למבנה.)
 else
+
     st.info(אנא העלה את שני קובצי האקסל (כיתות ומורים) ולחץ על כפתור הפקת השיבוץ.)
