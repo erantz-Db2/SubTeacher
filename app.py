@@ -36,22 +36,19 @@ def is_empty_cell(val: Any) -> bool:
     if str(val).strip().lower() in ["nan", "", "none"]: return True
     return False
 
-# מנוע קריאת קבצים חכם ועמיד בפני תקלות CSV
 def load_file(file_obj, file_name: str) -> pd.DataFrame:
     if file_obj.name.endswith('.csv'):
         file_obj.seek(0)
         df = pd.read_csv(file_obj)
-        # אם מזוהה עמודה אחת בלבד, נסה עם מפריד של אקסל ישראלי (נקודה-פסיק)
+        # תיקון לבעיית נקודה-פסיק בישראל
         if len(df.columns) <= 1:
             file_obj.seek(0)
             df = pd.read_csv(file_obj, sep=';')
-            # ניסיון אחרון עם טאבים
             if len(df.columns) <= 1:
                 file_obj.seek(0)
                 df = pd.read_csv(file_obj, sep='\t')
         return df
     else:
-        # קובץ אקסל רגיל xlsx
         return pd.read_excel(file_obj)
 
 # ==========================================
@@ -61,7 +58,6 @@ def load_and_clean_data(classes_file, teachers_file, day_of_week: str) -> Tuple[
     df_classes = load_file(classes_file, "כיתות")
     df_teachers = load_file(teachers_file, "מורים")
 
-    # הגנה מפני שגיאת positional indexer
     if len(df_classes.columns) < 2:
         raise ValueError("קובץ הכיתות לא זוהה נכון (נמצאה עמודה אחת בלבד). אנא שמור את הקובץ המקורי כ-Excel (.xlsx) והעלה אותו שוב.")
     if len(df_teachers.columns) < 2:
@@ -255,4 +251,59 @@ def main():
     day_of_week = st.sidebar.selectbox("בחר יום לשיבוץ", ["ראשון", "שני", "שלישי", "רביעי", "חמישי", "שישי"])
 
     st.sidebar.header("2. אילוצים יומיים")
-    full_absent_input = st.sidebar.text_input("מורים חסרים (יום שלם) - מופרדים בפסיק", "דליה, נועה, ר
+    full_absent_input = st.sidebar.text_input("מורים חסרים (יום שלם) - מופרדים בפסיק", "דליה, נועה, רותם, דקלה")
+    partial_absent_input = st.sidebar.text_area("היעדרויות חלקיות (פורמט: שם:שעות)", "נדין:3,4,5\nסתיו:3,4,5,6\nלירון צדוביץ:5,6\nרחל נוב:5,6\nאביטל:2,3,4,5,6")
+    external_subs_input = st.sidebar.text_area("מחליפים חיצוניים (פורמט: שם:שעות)", "יואב:1,2,3,4,5,6\nגלית:1,2,3,4,5\nאירית:3,4,5,6")
+    no_sub_input = st.sidebar.text_input("מורים שלא משבצים כמחליפים בכלל", "ספיר, לילך")
+
+    if st.sidebar.button("⚙️ הפק שיבוץ יומי"):
+        if not classes_file or not teachers_file:
+            st.warning("אנא העלה את שני הקבצים לפני הפקת השיבוץ.")
+            return
+
+        with st.spinner("מעבד נתונים ומרכיב מערכת..."):
+            try:
+                full_absent = parse_comma_separated(full_absent_input)
+                no_sub_list = parse_comma_separated(no_sub_input)
+                partial_absent = parse_time_constraints(partial_absent_input)
+                external_subs = parse_time_constraints(external_subs_input)
+
+                today_c, today_t, valid_t, raw_classes_df = load_and_clean_data(classes_file, teachers_file, day_of_week)
+                day_off_teachers = get_day_off_teachers(today_t, valid_t)
+                
+                df_results = generate_schedule(
+                    today_c, today_t, valid_t, day_off_teachers,
+                    full_absent, partial_absent, external_subs, no_sub_list
+                )
+
+                if df_results.empty:
+                    st.warning("לא נמצאו היעדרויות שדורשות מילוי מקום היום!")
+                    with st.expander("🛠️ כלי אבחון (לחץ כאן אם התוצאה לא הגיונית)"):
+                        st.write(f"**כמה שורות נמצאו ליום {day_of_week}?** {len(today_c)}")
+                        if len(today_c) == 0:
+                            st.error("הבעיה: המערכת לא מצאה את היום הזה באקסל. אולי העמודה של היום לא מופיעה ראשונה בקובץ?")
+                        st.write("**מורים בחופש מלא שאנו מחפשים:**", full_absent)
+                        st.write("**מורים בחופש חלקי שאנו מחפשים:**", list(partial_absent.keys()))
+                        st.write("**הצצה לקובץ הכיתות כפי שהמערכת קוראת אותו (5 שורות ראשונות):**")
+                        st.dataframe(raw_classes_df.head())
+                else:
+                    for teacher in df_results["מורה חסרה"].unique():
+                        st.subheader(f"מורה חסרה: {teacher}")
+                        display_df = df_results[df_results["מורה חסרה"] == teacher][["שעה", "כיתה", "מחליף ששובץ", "הערות"]]
+                        st.table(display_df)
+
+                    output = io.BytesIO()
+                    df_results.to_excel(output, index=False)
+                    st.download_button(
+                        label="📥 הורד דוח שיבוץ ל-Excel", 
+                        data=output.getvalue(), 
+                        file_name=f"Sub_Schedule_{day_of_week}.xlsx",
+                        type="primary"
+                    )
+                    st.success("השיבוץ הושלם בהצלחה!")
+                    
+            except Exception as e:
+                st.error(f"שגיאה מערכתית: {e}")
+
+if __name__ == "__main__":
+    main()
