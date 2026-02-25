@@ -31,16 +31,22 @@ if st.sidebar.button("⚙️ הפק שיבוץ יומי") and classes_file and t
         else:
             teachers_df = pd.read_excel(teachers_file)
 
-        # ניקוי וסידור נתונים בסיסי
+        # ניקוי בסיסי
+        classes_df.columns = [str(c).strip() for c in classes_df.columns]
+        teachers_df.columns = [str(c).strip() for c in teachers_df.columns]
+        
         classes_df.iloc[:, 0] = classes_df.iloc[:, 0].ffill()
-        classes_df = classes_df.replace("\n", "", regex=True)
-        today_c = classes_df[classes_df.iloc[:, 0].astype(str).str.contains(day_of_week, na=False)]
-
+        classes_df = classes_df.replace("\n", " ", regex=True)
+        
+        # סינון לפי יום
+        today_c = classes_df[classes_df.iloc[:, 0].astype(str).str.contains(day_of_week, na=False)].copy()
+        
         teachers_df.iloc[:, 0] = teachers_df.iloc[:, 0].ffill()
-        teachers_df = teachers_df.replace("\n", "", regex=True)
-        today_t = teachers_df[teachers_df.iloc[:, 0].astype(str).str.contains(day_of_week, na=False)]
+        day_map = {"ראשון": "ראשון", "שני": "שני", "שלישי": "שלישי", "רביעי": "רביעי", "חמישי": "חמישי", "שישי": "שישי"}
+        search_day = day_map.get(day_of_week, day_of_week)
+        today_t = teachers_df[teachers_df.iloc[:, 0].astype(str).str.contains(search_day, na=False)].copy()
 
-        # עיבוד קלטים מהמשתמש
+        # עיבוד קלטים
         full_absent = [x.strip() for x in full_absent_input.split(",")] if full_absent_input else []
         no_sub_list = [x.strip() for x in no_sub_input.split(",")] if no_sub_input else []
         
@@ -62,147 +68,124 @@ if st.sidebar.button("⚙️ הפק שיבוץ יומי") and classes_file and t
         valid_t = {}
         for i, col in enumerate(teachers_df.columns):
             t_name = str(teachers_df.iloc[0, i]).strip()
-            if t_name not in ["nan", "חווה חקלאית"] and "Unnamed" not in t_name:
+            if t_name not in ["nan", "חווה חקלאית", ""] and "Unnamed" not in t_name:
                 valid_t[col] = t_name
 
-        # מציאת מורים ביום חופשי
-        working_teachers = set()
-        for _, row in today_c.iterrows():
-            for col in today_c.columns[2:]:
-                val = str(row[col]).strip()
-                if val != "nan":
-                    for p in val.replace("+", "/").split("/"):
-                        p_clean = p.strip()
-                        for _, t_name in valid_t.items():
-                            if t_name == p_clean or t_name.split()[0] == p_clean:
-                                working_teachers.add(t_name)
-                                
-        for _, row in today_t.iterrows():
-            for col, t_name in valid_t.items():
-                if str(row[col]).strip() != "nan":
-                    working_teachers.add(t_name)
-                    
-        day_off_teachers = set(valid_t.values()) - working_teachers
+        # מציאת יום חופשי (לפי קובץ המורים בלבד כפי שביקשת)
+        day_off_teachers = set()
+        for col, t_name in valid_t.items():
+            if today_t[col].isnull().all() or (today_t[col].astype(str).str.strip() == "nan").all():
+                day_off_teachers.add(t_name)
 
         # חישוב צרכי מילוי מקום
         covers = []
         for _, row in today_c.iterrows():
-            try: 
-                hour = int(float(row.iloc[1]))
-            except: 
+            try:
+                hour_val = str(row.iloc[1]).strip()
+                hour = int(float(hour_val))
+            except:
                 continue
             if hour > 6: continue
             
             for col in today_c.columns[2:]:
-                teacher = str(row[col]).strip()
-                if teacher == "nan": continue
+                teacher_cell = str(row[col]).strip()
+                if teacher_cell == "nan" or teacher_cell == "": continue
                 
-                needs_cover = any(m in teacher for m in full_absent)
+                needs_cover = any(m in teacher_cell for m in full_absent)
                 if not needs_cover:
                     for m, hours in partial_absent.items():
-                        if m in teacher and hour in hours: 
+                        if m in teacher_cell and hour in hours:
                             needs_cover = True
+                            break
                 
                 if needs_cover:
+                    # בדיקת מורה נוסף בכיתה
+                    parts = teacher_cell.replace("+", "/").split("/")
                     present_teacher = False
-                    for p in teacher.replace("+", "/").split("/"):
-                        p_name = p.strip()
-                        if not p_name: continue
-                        is_p_missing = any(m in p_name for m in full_absent)
-                        for m, hours in partial_absent.items():
-                            if m in p_name and hour in hours: is_p_missing = True
-                        if not is_p_missing: present_teacher = True
+                    if len(parts) > 1:
+                        for p in parts:
+                            p_name = p.strip()
+                            is_p_missing = any(m in p_name for m in full_absent)
+                            for m, hours in partial_absent.items():
+                                if m in p_name and hour in hours: is_p_missing = True
+                            if not is_p_missing: present_teacher = True
                     
                     assigned = "(אין צורך במחליף)" if present_teacher else None
-                    covers.append({"שעה": hour, "כיתה": col, "מורה חסרה": teacher, "מחליף ששובץ": assigned, "הערות": ""})
+                    covers.append({"שעה": hour, "כיתה": col, "מורה חסרה": teacher_cell, "מחליף ששובץ": assigned, "הערות": ""})
 
-        # בניית פול מורים זמינים
-        teaching_schedule = {h: [] for h in range(1, 7)}
-        for _, row in today_c.iterrows():
-            try: 
-                hr = int(float(row.iloc[1]))
-            except: 
-                continue
-            if hr <= 6:
-                for col in today_c.columns[2:]:
-                    t = str(row[col]).strip()
-                    if t != "nan": teaching_schedule[hr].append(t)
+        if not covers:
+            st.warning("לא נמצאו מורים שזקוקים למילוי מקום לפי הנתונים שהוזנו.")
+        else:
+            # בניית פול מורים זמינים
+            teaching_schedule = {h: [] for h in range(1, 7)}
+            for _, row in today_c.iterrows():
+                try: hr = int(float(row.iloc[1]))
+                except: continue
+                if hr <= 6:
+                    for col in today_c.columns[2:]:
+                        t = str(row[col]).strip()
+                        if t != "nan": teaching_schedule[hr].append(t)
 
-        internal_availability = {h: [] for h in range(1, 7)}
-        for _, row in today_t.iterrows():
-            try: 
-                hour = int(float(row.iloc[1]))
-            except: 
-                continue
-            if hour > 6: continue
-            
-            for col, t_name in valid_t.items():
-                if t_name in day_off_teachers or any(m in t_name for m in full_absent + no_sub_list): 
-                    continue
-                if any(m in t_name and hour in hours for m, hours in partial_absent.items()): 
-                    continue
+            internal_availability = {h: [] for h in range(1, 7)}
+            for _, row in today_t.iterrows():
+                try: h_val = str(row.iloc[1]).strip()
+                hour = int(float(h_val))
+                except: continue
+                if hour > 6: continue
                 
-                teaching_now = any(t_name in c_t for c_t in teaching_schedule[hour])
-                if not teaching_now:
-                    val = str(row[col]).strip()
-                    if val == "nan": 
-                        internal_availability[hour].append({"name": t_name, "type": "חלון"})
-                    elif "פרטני" in val: 
-                        internal_availability[hour].append({"name": t_name, "type": "פרטני"})
+                for col, t_name in valid_t.items():
+                    if t_name in day_off_teachers or any(m in t_name for m in full_absent + no_sub_list): continue
+                    if any(m in t_name and hour in hours for m, hours in partial_absent.items()): continue
+                    
+                    teaching_now = any(t_name in c_t for c_t in teaching_schedule[hour])
+                    if not teaching_now:
+                        val = str(row[col]).strip().lower()
+                        if val == "nan" or val == "": internal_availability[hour].append({"name": t_name, "type": "חלון"})
+                        elif "פרטני" in val: internal_availability[hour].append({"name": t_name, "type": "פרטני"})
 
-        # שיבוץ בפועל
-        assigned_externals = {s: [] for s in external_subs}
-        assigned_internals = {t: 0 for t in valid_t.values()}
-        
-        for cover in covers:
-            if cover["מחליף ששובץ"]: continue
-            hr, assigned = cover["שעה"], False
+            # שיבוץ
+            assigned_externals = {s: [] for s in external_subs}
+            assigned_internals = {t: 0 for t in valid_t.values()}
             
-            for sub, h_list in external_subs.items():
-                if hr in h_list and hr not in assigned_externals[sub]:
-                    cover["מחליף ששובץ"] = sub
-                    cover["הערות"] = "מחליף חיצוני"
-                    assigned_externals[sub].append(hr)
-                    assigned = True
-                    break
-            if assigned: continue
-            
-            avails = sorted(internal_availability[hr], key=lambda x: 0 if x["type"] == "חלון" else 1)
-            for av in avails:
-                t_name, t_type = av["name"], av["type"]
-                if assigned_internals[t_name] < 1:
-                    already_in_hour = any(c.get("מחליף ששובץ") == t_name for c in covers if c["שעה"] == hr)
-                    if not already_in_hour:
-                        cover["מחליף ששובץ"] = t_name
-                        cover["הערות"] = f"שובץ מהצוות ({t_type})"
-                        assigned_internals[t_name] += 1
+            for cover in covers:
+                if cover["מחליף ששובץ"]: continue
+                hr = cover["שעה"]
+                assigned = False
+                
+                for sub, h_list in external_subs.items():
+                    if hr in h_list and hr not in assigned_externals[sub]:
+                        cover["מחליף ששובץ"] = sub
+                        cover["הערות"] = "מחליף חיצוני"
+                        assigned_externals[sub].append(hr)
                         assigned = True
                         break
-            
-            if not assigned: 
-                cover["מחליף ששובץ"] = "⚠️ חסר מורה!"
+                if assigned: continue
+                
+                avails = sorted(internal_availability[hr], key=lambda x: 0 if x["type"] == "חלון" else 1)
+                for av in avails:
+                    t_name, t_type = av["name"], av["type"]
+                    if assigned_internals[t_name] < 1:
+                        already_in_hour = any(c.get("מחליף ששובץ") == t_name for c in covers if c["שעה"] == hr)
+                        if not already_in_hour:
+                            cover["מחליף ששובץ"] = t_name
+                            cover["הערות"] = f"מתוך הצוות ({t_type})"
+                            assigned_internals[t_name] += 1
+                            assigned = True
+                            break
+                if not assigned: cover["מחליף ששובץ"] = "⚠️ חסר מורה!"
 
-        # הצגת התוצאות
-        covers_df = pd.DataFrame(covers)
-        for teacher in covers_df["מורה חסרה"].unique():
-            st.markdown(f"### מורה חסרה: {teacher}")
-            teacher_df = covers_df[covers_df["מורה חסרה"] == teacher].copy()
-            teacher_df = teacher_df[["שעה", "כיתה", "מחליף ששובץ", "הערות"]]
-            st.dataframe(teacher_df, use_container_width=True, hide_index=True)
+            # הצגת תוצאות
+            df_final = pd.DataFrame(covers)
+            for teacher in df_final["מורה חסרה"].unique():
+                st.subheader(f"מורה חסרה: {teacher}")
+                temp_df = df_final[df_final["מורה חסרה"] == teacher][["שעה", "כיתה", "מחליף ששובץ", "הערות"]]
+                st.table(temp_df)
 
-        # כפתור הורדה
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            covers_df.to_excel(writer, index=False, sheet_name='שיבוץ יומי')
-        st.download_button(
-            label="📥 הורד שיבוץ לקובץ Excel",
-            data=output.getvalue(),
-            file_name=f"שיבוץ_יום_{day_of_week}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        st.success("השיבוץ הושלם בהצלחה!")
-        
+            # הורדה
+            output = io.BytesIO()
+            df_final.to_excel(output, index=False)
+            st.download_button(label="📥 הורד דוח אקסל", data=output.getvalue(), file_name="replacement_report.xlsx")
+            st.success("השיבוץ הסתיים!")
+
     except Exception as e:
-        st.error(f"שגיאה בעיבוד הנתונים: {str(e)}")
-else:
-    st.info("אנא העלה קבצים ולחץ על הפק שיבוץ.")
+        st.error(f"שגיאה בעיבוד הנתונים: {e}")
